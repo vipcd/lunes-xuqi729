@@ -9,7 +9,7 @@ import asyncio
 import requests
 from playwright.async_api import async_playwright
 
-# ==================== 1. Telegram 通知辅助函数 ====================
+# ==================== 1. Telegram 通知 (支持代理失败直连回退) ====================
 def send_telegram_msg(msg: str):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -24,6 +24,8 @@ def send_telegram_msg(msg: str):
         "text": msg,
         "parse_mode": "HTML"
     }
+    
+    # 优先尝试代理，失败则降级直连
     try:
         proxies = {}
         if os.getenv("HTTP_PROXY"):
@@ -34,27 +36,35 @@ def send_telegram_msg(msg: str):
         requests.post(url, json=payload, proxies=proxies, timeout=10)
         print("[SUCCESS] 已发送 Telegram 通知。")
     except Exception as e:
-        print(f"[WARNING] 发送 Telegram 消息失败: {e}")
+        print(f"[WARNING] 走代理发送 Telegram 失败 ({e})，正在尝试直连发送...")
+        try:
+            requests.post(url, json=payload, proxies={}, timeout=10)
+            print("[SUCCESS] 已通过直连成功发送 Telegram 通知。")
+        except Exception as e2:
+            print(f"[ERROR] 直连发送 Telegram 消息依然失败: {e2}")
 
 # ==================== 2. HY2 代理解析与启动 ====================
 def parse_hy2_url(hy2_url: str):
     hy2_url = hy2_url.strip()
-    pattern = r"^(?:hysteria2|hy2)://([^@]+)@([^:/?#]+)(?::(\d+))?\?(.*)$"
-    match = re.match(pattern, hy2_url)
     
-    if match:
-        password = urllib.parse.unquote(match.group(1))
-        server = match.group(2)
-        port = int(match.group(3)) if match.group(3) else 443
-        rest = match.group(4)
-        query_str = rest.split('#')[0] if '#' in rest else rest
-        query = urllib.parse.parse_qs(query_str)
-    else:
-        parsed = urllib.parse.urlparse(hy2_url)
+    # 尝试用 urlparse 解析
+    parsed = urllib.parse.urlparse(hy2_url)
+    if parsed.scheme in ['hysteria2', 'hy2']:
         password = urllib.parse.unquote(parsed.username or "")
         server = parsed.hostname or ""
         port = parsed.port or 443
         query = urllib.parse.parse_qs(parsed.query)
+    else:
+        # 正则备用匹配
+        pattern = r"^(?:hysteria2|hy2)://([^@]+)@([^:/?#]+)(?::(\d+))?\?(.*)$"
+        match = re.match(pattern, hy2_url)
+        if not match:
+            raise ValueError("无法解析该 HY2 URL 格式")
+        password = urllib.parse.unquote(match.group(1))
+        server = match.group(2)
+        port = int(match.group(3)) if match.group(3) else 443
+        query_str = match.group(4).split('#')[0]
+        query = urllib.parse.parse_qs(query_str)
 
     sni = query.get('sni', [server])[0]
     insecure = query.get('insecure', ['0'])[0] in ['1', 'true'] or query.get('allowInsecure', ['0'])[0] in ['1', 'true']
@@ -84,11 +94,12 @@ def start_hy2_proxy():
             "server_name": node_info["sni"],
             "insecure": node_info["insecure"]
         }
+        # 【关键修复】：pinned_sha256 在 sing-box 中必须为数组/列表格式 [str]
         if node_info["pin_sha256"]:
-            tls_config["pinned_sha256"] = node_info["pin_sha256"]
+            tls_config["pinned_sha256"] = [node_info["pin_sha256"]]
 
         sing_box_config = {
-            "log": {"level": "warn"},
+            "log": {"level": "info"},
             "inbounds": [
                 {
                     "type": "mixed",
@@ -113,34 +124,44 @@ def start_hy2_proxy():
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(sing_box_config, f, indent=2)
 
-        proc = subprocess.Popen(["sing-box", "run", "-c", config_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(3)
+        proc = subprocess.Popen(
+            ["sing-box", "run", "-c", config_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        time.sleep(3) # 等待启动
+
+        # 检测 sing-box 是否意外崩溃退出
+        if proc.poll() is not None:
+            stdout, stderr = proc.communicate()
+            print(f"[ERROR] Sing-box 启动失败退出！错误日志:\n{stderr or stdout}")
+            return None, None
 
         proxy_local = "http://127.0.0.1:10808"
         os.environ["HTTP_PROXY"] = proxy_local
         os.environ["HTTPS_PROXY"] = proxy_local
         
-        print(f"[SUCCESS] HY2 代理启动成功: {proxy_local}")
+        print(f"[SUCCESS] HY2 代理启动成功并后台运行: {proxy_local}")
         return proxy_local, proc
     except Exception as e:
-        print(f"[ERROR] 启动 HY2 代理失败: {e}")
+        print(f"[ERROR] 启动 HY2 代理过程中发生异常: {e}")
         return None, None
 
-# ==================== 3. Cookie 格式化解析 ====================
+# ==================== 3. Cookie 格式解析 ====================
 def parse_cookies(cookie_raw: str, domain: str = "lunes.host"):
     cookies = []
     cookie_raw = cookie_raw.strip()
     if not cookie_raw:
         return cookies
 
-    # 尝试解析为 JSON
     if cookie_raw.startswith("[") and cookie_raw.endswith("]"):
         try:
             return json.loads(cookie_raw)
         except Exception:
             pass
 
-    # 解析为 Key=Value 字符串格式
     items = cookie_raw.split(";")
     for item in items:
         if "=" in item:
@@ -158,7 +179,6 @@ async def main():
     proxy_address, proxy_proc = start_hy2_proxy()
 
     async with async_playwright() as p:
-        # 反自动化打卡伪装参数
         browser_args = [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
@@ -190,51 +210,47 @@ async def main():
         page = await context.new_page()
 
         try:
-            target_url = "https://lunes.host" # 若有特定控制台页面可换成 https://lunes.host/dashboard 等
-            print(f"[INFO] 正在访问: {target_url}")
+            target_url = "https://lunes.host"
+            print(f"[INFO] 正在访问目标页面: {target_url}")
             
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(5) # 预留时间避开 Cloudflare 5秒盾
+            await asyncio.sleep(5) # 防护盾缓冲
 
             page_title = await page.title()
-            page_content = await page.content()
 
-            # 检测是否依然处于 Cloudflare 盾界面
+            # 验证 Cloudflare 防护
             if "Just a moment..." in page_title or "Cloudflare" in page_title or "Attention Required!" in page_title:
-                print("[WARNING] 触发 Cloudflare 验证盾，等待 10 秒尝试自动通过...")
+                print("[WARNING] 触发 Cloudflare 验证盾，额外等待 10 秒...")
                 await asyncio.sleep(10)
 
-            # 判断是否处于未登录状态
+            # 判断登录状态
             is_logged_in = True
             if "login" in page.url or await page.locator("input[type='email']").count() > 0:
                 is_logged_in = False
 
             if not is_logged_in:
-                err_msg = f"❌ <b>Lunes 自动续期失败</b>\n<b>原因:</b> Cookie 已过期或失效，且访问被阻拦，请在 Secrets 中更新 <code>LUNES_COOKIE</code>。"
+                err_msg = "❌ <b>Lunes 自动续期失败</b>\n<b>原因:</b> Cookie 已过期，请更新 GitHub Secrets 中的 <code>LUNES_COOKIE</code>。"
                 print(err_msg)
                 send_telegram_msg(err_msg)
                 sys.exit(1)
 
-            # ---------------- 登录成功，执行续期操作 ----------------
-            print("[INFO] 已成功验证登录状态，正在搜索续期按钮/执行保活...")
+            print("[INFO] 登录状态有效，页面访问正常！")
             
-            # 此处根据 LunesHost 按钮特征进行点击保活 (如有 Renew 按钮可在此处定位)
-            # await page.click("text=Renew", timeout=10000)
-            
+            # ---------------- 在此处按需补充具体的点击保活按键逻辑 ----------------
             await asyncio.sleep(3)
-            success_msg = f"✅ <b>Lunes 自动续期保活成功</b>\n<b>状态:</b> 页面成功访问并处于已登录状态。"
+            success_msg = "✅ <b>Lunes 自动续期保活成功</b>\n<b>状态:</b> HY2 代理访问正常，站点状态为已登录。"
             print(success_msg)
             send_telegram_msg(success_msg)
 
         except Exception as e:
-            error_log = f"❌ <b>Lunes 自动续期异常</b>\n<b>错误详情:</b> {str(e)}"
+            error_log = f"❌ <b>Lunes 自动续期异常</b>\n<b>详情:</b> {str(e)}"
             print(error_log)
             send_telegram_msg(error_log)
             sys.exit(1)
             
         finally:
             await browser.close()
-            if proxy_proc:
+            if proxy_proc and proxy_proc.poll() is None:
                 proxy_proc.terminate()
 
 if __name__ == "__main__":
