@@ -5,7 +5,6 @@ on:
     - cron: '07 15 * * *' # 每天定时运行
   workflow_dispatch: # 支持手动触发
 
-# 赋予 GitHub 自动清理工作流运行记录的权限
 permissions:
   contents: read
   actions: write
@@ -23,30 +22,24 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install sing-box (for HY2 Proxy)
+      # 安装 Ubuntu 物理过盾所需的虚拟显示屏 (Xvfb) 和 GUI 依赖
+      - name: Install System GUI Dependencies
         run: |
-          echo "正在安装 sing-box 客户端..."
-          LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-          VERSION=${LATEST_TAG#v}
-          curl -LO "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION}-linux-amd64.tar.gz"
-          tar -xzf "sing-box-${VERSION}-linux-amd64.tar.gz"
-          sudo mv "sing-box-${VERSION}-linux-amd64/sing-box" /usr/local/bin/
-          chmod +x /usr/local/bin/sing-box
-          sing-box version
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk python3-dev scrot
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install playwright requests
-          playwright install chromium
+          pip install seleniumbase requests pyautogui
 
       - name: Run Lunes Keepalive Script
         env:
-          HY2_URL: ${{ secrets.HY2_URL }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LUNES_COOKIE: ${{ secrets.LUNES_COOKIE }}
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LUNES_EMAIL: ${{ secrets.LUNES_EMAIL }}
+          LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
+          LUNES_SERVER_URL: ${{ secrets.LUNES_SERVER_URL }}
         run: |
           python lunes_run.py
 
