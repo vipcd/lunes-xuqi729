@@ -1,273 +1,152 @@
 import os
-import sys
-import json
 import time
-import re
-import socket
+import json
 import urllib.parse
-import subprocess
-import asyncio
 import requests
-from playwright.async_api import async_playwright
+# 引入 SeleniumBase 高级过盾包
+from seleniumbase import SB
 
-# ==================== 1. Telegram 通知 (强制直连，不受代理影响) ====================
-def send_telegram_msg(msg: str):
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    
-    if not bot_token or not chat_id:
-        print("[TG通知] 未配置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，跳过发送消息。", flush=True)
+SERVER_URL = os.getenv("LUNES_SERVER_URL")
+LUNES_EMAIL = os.getenv("LUNES_EMAIL")
+LUNES_PASSWORD = os.getenv("LUNES_PASSWORD")
+
+def send_tg_notification(message, photo_path=None):
+    """发送结果和截图至 Telegram"""
+    token = os.getenv("TG_BOT_TOKEN")
+    chat_id = os.getenv("TG_CHAT_ID")
+    if not token or not chat_id:
+        print("未配置 TG 机器人变量，跳过发送 TG 推送。")
         return
 
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": msg,
-        "parse_mode": "HTML"
-    }
-    
     try:
-        # 强制不设置 proxies，走 GitHub Runner 的直连网络发送 Telegram
-        resp = requests.post(url, json=payload, proxies={"http": None, "https": None}, timeout=15)
-        if resp.status_code == 200:
-            print("[TG通知] Telegram 消息成功发送给机器人！", flush=True)
-        else:
-            print(f"[TG通知] Telegram 发送失败，状态码: {resp.status_code}, 返回内容: {resp.text}", flush=True)
-    except Exception as e:
-        print(f"[TG通知] Telegram 发送过程发生异常: {e}", flush=True)
-
-# ==================== 2. HY2 代理解析与启动 ====================
-def parse_hy2_url(hy2_url: str):
-    hy2_url = hy2_url.strip()
-    
-    parsed = urllib.parse.urlparse(hy2_url)
-    if parsed.scheme in ['hysteria2', 'hy2']:
-        password = urllib.parse.unquote(parsed.username or "")
-        server = parsed.hostname or ""
-        port = parsed.port or 443
-        query = urllib.parse.parse_qs(parsed.query)
-    else:
-        pattern = r"^(?:hysteria2|hy2)://([^@]+)@([^:/?#]+)(?::(\d+))?\?(.*)$"
-        match = re.match(pattern, hy2_url)
-        if not match:
-            raise ValueError("无法解析该 HY2 链接格式，请检查变量内容。")
-        password = urllib.parse.unquote(match.group(1))
-        server = match.group(2)
-        port = int(match.group(3)) if match.group(3) else 443
-        query_str = match.group(4).split('#')[0]
-        query = urllib.parse.parse_qs(query_str)
-
-    sni = query.get('sni', [server])[0]
-    insecure = query.get('insecure', ['0'])[0] in ['1', 'true'] or query.get('allowInsecure', ['0'])[0] in ['1', 'true']
-
-    return {
-        "password": password,
-        "server": server,
-        "port": port,
-        "sni": sni,
-        "insecure": insecure
-    }
-
-def is_port_open(host="127.0.0.1", port=10808):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    result = sock.connect_ex((host, port))
-    sock.close()
-    return result == 0
-
-def start_hy2_proxy():
-    hy2_url = os.getenv("HY2_URL", "").strip()
-    if not hy2_url:
-        print("[INFO] 未检测到 HY2_URL 环境变量，将以 GitHub 直连模式运行。", flush=True)
-        return None, None
-
-    print("[INFO] 检测到 HY2 节点，正在生成 Sing-box 客户端配置...", flush=True)
-    try:
-        node_info = parse_hy2_url(hy2_url)
-        
-        sing_box_config = {
-            "log": {"level": "warn"},
-            "inbounds": [
-                {
-                    "type": "mixed",
-                    "tag": "mixed-in",
-                    "listen": "127.0.0.1",
-                    "listen_port": 10808
-                }
-            ],
-            "outbounds": [
-                {
-                    "type": "hysteria2",
-                    "tag": "hy2-out",
-                    "server": node_info["server"],
-                    "server_port": node_info["port"],
-                    "password": node_info["password"],
-                    "tls": {
-                        "enabled": True,
-                        "server_name": node_info["sni"],
-                        "insecure": node_info["insecure"]
-                    }
-                }
-            ]
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
         }
-
-        config_path = "sing_box_config.json"
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(sing_box_config, f, indent=2)
-
-        proc = subprocess.Popen(
-            ["sing-box", "run", "-c", config_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        for _ in range(5):
-            time.sleep(1)
-            if is_port_open():
-                proxy_local = "http://127.0.0.1:10808"
-                os.environ["HTTP_PROXY"] = proxy_local
-                os.environ["HTTPS_PROXY"] = proxy_local
-                print(f"[SUCCESS] HY2 代理启动成功并监听于: {proxy_local}", flush=True)
-                return proxy_local, proc
-
-        stdout, stderr = proc.communicate()
-        print(f"[ERROR] Sing-box 进程启动失败！日志输出:\n{stderr or stdout}", flush=True)
-        return None, None
-
+        requests.post(url, json=payload, timeout=15)
+        print("TG 状态通知发送成功。")
     except Exception as e:
-        print(f"[ERROR] 解析 HY2 节点或生成配置时发生异常: {e}", flush=True)
-        return None, None
+        print(f"发送 TG 消息异常: {e}")
 
-# ==================== 3. Cookie 解析 ====================
-def parse_cookies(cookie_raw: str, domain: str = "lunes.host"):
-    cookies = []
-    cookie_raw = cookie_raw.strip()
-    if not cookie_raw:
-        return cookies
-
-    if cookie_raw.startswith("[") and cookie_raw.endswith("]"):
+    if photo_path and os.path.exists(photo_path):
         try:
-            return json.loads(cookie_raw)
-        except Exception:
-            pass
-
-    items = cookie_raw.split(";")
-    for item in items:
-        if "=" in item:
-            name, value = item.strip().split("=", 1)
-            cookies.append({
-                "name": name.strip(),
-                "value": value.strip(),
-                "domain": f".{domain.lstrip('.')}",
-                "path": "/"
-            })
-    return cookies
-
-# ==================== 4. 主任务运行逻辑 ====================
-async def main():
-    proxy_address, proxy_proc = start_hy2_proxy()
-
-    # 动态获取目标面板 URL（优先使用环境变量，未设置时兜底为默认地址）
-    target_url = os.getenv("LUNES_SERVER_URL", "https://lunes.host").strip()
-    if not target_url:
-        target_url = "https://lunes.host"
-
-    # 根据目标 URL 自动提取 Base 域名（如 betadash.lunes.host -> lunes.host）
-    target_host = urllib.parse.urlparse(target_url).hostname or "lunes.host"
-    domain_parts = target_host.split(".")
-    cookie_domain = ".".join(domain_parts[-2:]) if len(domain_parts) >= 2 else target_host
-
-    async with async_playwright() as p:
-        browser_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-setuid-sandbox"
-        ]
-        
-        launch_options = {
-            "headless": True,
-            "args": browser_args
-        }
-        if proxy_address:
-            launch_options["proxy"] = {"server": proxy_address}
-
-        print("[INFO] 正在启动 Playwright Chromium 浏览器...", flush=True)
-        browser = await p.chromium.launch(**launch_options)
-        
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 720}
-        )
-
-        # 注入 Cookie（自动使用动态提取的域名）
-        cookie_env = os.getenv("LUNES_COOKIE", "")
-        if cookie_env:
-            cookies = parse_cookies(cookie_env, domain=cookie_domain)
-            if cookies:
-                await context.add_cookies(cookies)
-                print(f"[INFO] 已向浏览器注入 {len(cookies)} 个 Cookie 参数（域名: {cookie_domain}）。", flush=True)
-            else:
-                print("[WARNING] 检测到 LUNES_COOKIE 环境变量，但解析为空！", flush=True)
-        else:
-            print("[WARNING] 未找到 LUNES_COOKIE 环境变量，将以未登录状态直接访问。", flush=True)
-
-        page = await context.new_page()
-
-        try:
-            print(f"[INFO] 正在打开目标面板页面: {target_url}", flush=True)
-            
-            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            print(f"[INFO] 页面加载完成，状态码: {response.status if response else 'Unknown'}", flush=True)
-            
-            await asyncio.sleep(5) # 缓冲等待页面渲染
-
-            current_url = page.url
-            page_title = await page.title()
-            
-            print("==================== 登录与运行结果 ====================", flush=True)
-            print(f"📌 当前网页标题: {page_title}", flush=True)
-            print(f"📌 当前实际网址: {current_url}", flush=True)
-
-            # 判断登录与 Cloudflare 验证状态
-            if "Just a moment..." in page_title or "Cloudflare" in page_title:
-                print("⚠️ [检测] 触发了 Cloudflare 盾，正在额外等待 10 秒...", flush=True)
-                await asyncio.sleep(10)
-                page_title = await page.title()
-                current_url = page.url
-
-            # 探测登录状态
-            has_email_input = await page.locator("input[type='email']").count() > 0
-            if "login" in current_url.lower() or has_email_input:
-                is_logged_in = False
-            else:
-                is_logged_in = True
-
-            if not is_logged_in:
-                status_text = "❌ 续期失败：Cookie 已失效/被退回登录界面。"
-                print(f"📌 登录状态判定: {status_text}", flush=True)
-                print("========================================================", flush=True)
-                
-                send_telegram_msg(f"❌ <b>Lunes 自动续期报告</b>\n<b>状态:</b> Cookie 已过期失效，页面被重定向回登录页。\n<b>目标页面:</b> {target_url}\n<b>当前URL:</b> {current_url}")
-                sys.exit(1)
-
-            status_text = "✅ 登录状态有效，访问续期页面成功！"
-            print(f"📌 登录状态判定: {status_text}", flush=True)
-            print("========================================================", flush=True)
-            
-            # 发送成功 TG 通知
-            send_telegram_msg(f"✅ <b>Lunes 自动续期成功报告</b>\n<b>网页标题:</b> {page_title}\n<b>访问目标:</b> {target_url}\n<b>状态:</b> Cookie 验证正常，保活访问成功！")
-
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                files = {"photo": f}
+                data = {"chat_id": chat_id, "caption": "Lunes Host 实时画面"}
+                requests.post(url, data=data, files=files, timeout=30)
+            print("TG 截图发送成功。")
         except Exception as e:
-            err_detail = f"❌ <b>Lunes 自动续期异常</b>\n<b>详细报错:</b> {str(e)}"
-            print(f"[ERROR] 执行出错: {e}", flush=True)
-            send_telegram_msg(err_detail)
-            sys.exit(1)
+            print(f"发送 TG 截图异常: {e}")
+
+def run():
+    if not SERVER_URL or not LUNES_EMAIL or not LUNES_PASSWORD:
+        print("错误: 缺少 LUNES_SERVER_URL、LUNES_EMAIL 或 LUNES_PASSWORD 环境变量")
+        return
+
+    # 启动 SeleniumBase（移除硬编码的 40000 代理）
+    with SB(uc=True, xvfb=True) as sb:
+        
+        # ⚡ 3 次重试机制
+        success = False
+        for i in range(3):
+            try:
+                print(f"正在访问 Lunes Host 登录界面 (第 {i+1}/3 次尝试)...")
+                sb.uc_open_with_reconnect("https://betadash.lunes.host/login", reconnect_time=8)
+                sb.sleep(5)
+                
+                # 检查页面是否由于网络解析异常加载失败
+                current_url = sb.get_current_url()
+                page_source_lower = sb.get_page_source().lower()
+                if "dns_probe_finished_nxdomain" in page_source_lower or "can’t be reached" in page_source_lower or "something went wrong" in page_source_lower:
+                    print("⚠️ 检测到 DNS 解析失败 (NXDOMAIN) 或连接异常，原地等待 5 秒后执行自动重试...")
+                    sb.sleep(5)
+                    continue
+                
+                success = True
+                break
+            except Exception as e:
+                print(f"访问页面发生异常: {e}，原地等待 5 秒后执行自动重试...")
+                sb.sleep(5)
+
+        if not success:
+            print("❌ 错误: 经过 3 次重试仍无法加载页面，已触发网络阻断。")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification("❌ <b>Lunes Host 访问失败</b>\n经过 3 次重试仍无法加载 Lunes 登录页（可能遭遇临时线路阻断）。", "lunes_debug_screenshot.png")
+            return
+
+        # 2. 核心过盾：自动寻找并执行系统物理级点击，过掉最外层的 Cloudflare 验证盾
+        sb.save_screenshot("lunes_debug_screenshot.png")
+        try:
+            print("正在检测并调用系统级 PyAutoGUI 驱动，物理点击最外层 Cloudflare 验证盾...")
+            sb.uc_gui_click_captcha()
+            sb.sleep(10) # 给予 10 秒跳转缓冲
+            sb.save_screenshot("lunes_debug_screenshot.png")
+        except Exception as e:
+            print(f"验证盾点击结束或已被跳过: {e}")
+
+        # 3. 填充表单
+        try:
+            print("正在定位账号密码输入框并填充...")
+            sb.wait_for_element_visible("input[type='email']", timeout=15)
+            sb.update_text("input[type='email']", LUNES_EMAIL)
             
-        finally:
-            await browser.close()
-            if proxy_proc and proxy_proc.poll() is None:
-                proxy_proc.terminate()
+            sb.update_text("input[type='password']", LUNES_PASSWORD)
+            sb.sleep(1)
+
+            # 4. 点击“记住我”
+            if sb.is_element_visible("input[type='checkbox']"):
+                sb.click("input[type='checkbox']")
+                print("已成功勾选记住我。")
+
+            # 5. 核心过盾 2：自动检测并物理点击登录表单下方内嵌的验证盾
+            try:
+                print("正在检测并物理点击登录表单下方内嵌的验证盾...")
+                sb.uc_gui_click_captcha()
+                sb.sleep(5)
+            except Exception as e:
+                print(f"表单内嵌验证盾处理完成: {e}")
+
+            # 6. 点击 Continue 按钮提交登录
+            submit_btn_selector = "button:contains('Continue'), button:contains('Zaloguj'), button[type='submit']"
+            if sb.is_element_visible(submit_btn_selector):
+                print("正在点击 Continue 提交表单...")
+                sb.click(submit_btn_selector)
+                sb.sleep(10) # 等待登录跳转
+        except Exception as e:
+            print(f"❌ 自动登录过程中发生异常: {e}")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification(f"❌ <b>Lunes Host 运行异常</b>\n执行自动填表登录时失败: {e}", "lunes_debug_screenshot.png")
+            return
+
+        # 7. 验证登录状态并跳转至保活目标页
+        current_url = sb.get_current_url()
+        if "login" in current_url or sb.is_element_visible("input[type='email']"):
+            print("❌ 自动登录失败：仍停留在登录页面。")
+            sb.save_screenshot("lunes_debug_screenshot.png")
+            send_tg_notification("❌ <b>Lunes Host 自动登录失败</b>\n未能成功进入后台系统。", "lunes_debug_screenshot.png")
+            return
+
+        print(f"✓ 登录成功！正在跳转至目标保活控制面板: {SERVER_URL}")
+        sb.open(SERVER_URL)
+        
+        # 停留 15 秒，刷新活跃心跳
+        sb.sleep(15)
+
+        # 保存打卡完成截图
+        sb.save_screenshot("lunes_debug_screenshot.png")
+        print("已截取登录打卡画面。")
+
+        if "login" in sb.get_current_url() or sb.is_element_visible("input[type='email']"):
+            msg = "❌ <b>Lunes Host 登录失效！</b>\n跳转至面板页面时，发现状态退回到了未登录状态。"
+            print(msg)
+            send_tg_notification(msg, "lunes_debug_screenshot.png")
+        else:
+            msg = "✅ <b>Lunes Host 每日自动登录打卡成功！</b>\n已通过账号密码 + 物理双重过盾机制刷新控制面板活跃状态。"
+            print(msg)
+            send_tg_notification(msg, "lunes_debug_screenshot.png")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()
