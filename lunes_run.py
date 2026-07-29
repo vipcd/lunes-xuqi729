@@ -69,7 +69,6 @@ def parse_hy2_url(hy2_url: str):
     }
 
 def is_port_open(host="127.0.0.1", port=10808):
-    """检测本地代理端口是否成功启动监听"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(1)
     result = sock.connect_ex((host, port))
@@ -86,7 +85,6 @@ def start_hy2_proxy():
     try:
         node_info = parse_hy2_url(hy2_url)
         
-        # 兼容标准 sing-box 1.x TLS 配置结构
         sing_box_config = {
             "log": {"level": "warn"},
             "inbounds": [
@@ -124,7 +122,6 @@ def start_hy2_proxy():
             text=True
         )
         
-        # 循环等待最多 5 秒探针检测端口
         for _ in range(5):
             time.sleep(1)
             if is_port_open():
@@ -134,7 +131,6 @@ def start_hy2_proxy():
                 print(f"[SUCCESS] HY2 代理启动成功并监听于: {proxy_local}", flush=True)
                 return proxy_local, proc
 
-        # 如果未监听成功，输出崩溃日志
         stdout, stderr = proc.communicate()
         print(f"[ERROR] Sing-box 进程启动失败！日志输出:\n{stderr or stdout}", flush=True)
         return None, None
@@ -194,7 +190,7 @@ async def main():
             viewport={"width": 1280, "height": 720}
         )
 
-        # 注入 Cookie
+        # 注入 Cookie（支持域名 .lunes.host 下的所有子域名）
         cookie_env = os.getenv("LUNES_COOKIE", "")
         if cookie_env:
             cookies = parse_cookies(cookie_env, domain="lunes.host")
@@ -209,8 +205,8 @@ async def main():
         page = await context.new_page()
 
         try:
-            target_url = "https://lunes.host"
-            print(f"[INFO] 正在打开目标页面: {target_url}", flush=True)
+            target_url = "https://betadash.lunes.host/"
+            print(f"[INFO] 正在打开控制台目标页面: {target_url}", flush=True)
             
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             print(f"[INFO] 页面加载完成，状态码: {response.status if response else 'Unknown'}", flush=True)
@@ -220,7 +216,6 @@ async def main():
             current_url = page.url
             page_title = await page.title()
             
-            # 【日志输出】非常直观地打出当前页面结果
             print("==================== 登录与运行结果 ====================", flush=True)
             print(f"📌 当前网页标题: {page_title}", flush=True)
             print(f"📌 当前实际网址: {current_url}", flush=True)
@@ -232,27 +227,24 @@ async def main():
                 page_title = await page.title()
                 current_url = page.url
 
-            # 探测登录状态
+            # 探测登录状态：如果跳转回 login / auth 页面或存在邮箱输入框，说明未登录/Cookie过期
             has_email_input = await page.locator("input[type='email']").count() > 0
-            if "login" in current_url.lower() or has_email_input:
-                is_logged_in = False
-            else:
-                is_logged_in = True
+            is_login_page = "login" in current_url.lower() or "auth" in current_url.lower() or has_email_input
 
-            if not is_logged_in:
-                status_text = "❌ 续期失败：Cookie 已失效/被退回登录界面。"
+            if is_login_page:
+                status_text = "❌ 续期失败：Cookie 已失效/被重定向回登录界面。"
                 print(f"📌 登录状态判定: {status_text}", flush=True)
                 print("========================================================", flush=True)
                 
-                send_telegram_msg(f"❌ <b>Lunes 自动续期报告</b>\n<b>状态:</b> Cookie 已过期失效，页面被重定向回登录页。\n<b>当前URL:</b> {current_url}")
+                send_telegram_msg(f"❌ <b>Lunes 自动续期报告</b>\n<b>状态:</b> Cookie 已过期失效，页面被重定向至登录页。\n<b>当前URL:</b> {current_url}")
                 sys.exit(1)
 
-            status_text = "✅ 登录状态有效，访问续期页面成功！"
+            status_text = "✅ 登录状态有效，成功进入后台控制台！"
             print(f"📌 登录状态判定: {status_text}", flush=True)
             print("========================================================", flush=True)
             
             # 发送成功 TG 通知
-            send_telegram_msg(f"✅ <b>Lunes 自动续期成功报告</b>\n<b>网页标题:</b> {page_title}\n<b>状态:</b> Cookie 验证正常，保活访问成功！")
+            send_telegram_msg(f"✅ <b>Lunes 自动续期成功报告</b>\n<b>后台标题:</b> {page_title}\n<b>控制台地址:</b> {current_url}\n<b>状态:</b> HY2 代理访问正常，成功登录并进入控制台！")
 
         except Exception as e:
             err_detail = f"❌ <b>Lunes 自动续期异常</b>\n<b>详细报错:</b> {str(e)}"
