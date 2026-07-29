@@ -1,0 +1,66 @@
+name: LunesHost Keepalive
+
+on:
+  schedule:
+    - cron: '07 15 * * *' # 每天定时运行
+  workflow_dispatch: # 支持手动触发
+
+# 赋予 GitHub 自动清理工作流运行记录的权限
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install sing-box (for HY2 Proxy)
+        run: |
+          echo "正在安装 sing-box 客户端..."
+          LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION=${LATEST_TAG#v}
+          curl -LO "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION}-linux-amd64.tar.gz"
+          tar -xzf "sing-box-${VERSION}-linux-amd64.tar.gz"
+          sudo mv "sing-box-${VERSION}-linux-amd64/sing-box" /usr/local/bin/
+          chmod +x /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install playwright requests
+          playwright install chromium
+
+      - name: Run Lunes Keepalive Script
+        env:
+          HY2_URL: ${{ secrets.HY2_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LUNES_COOKIE: ${{ secrets.LUNES_COOKIE }}
+        run: |
+          python lunes_run.py
+
+      - name: Auto Clean Old Workflow Runs (Keep Current Only)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "开始清理历史工作流记录，仅保留当前一条记录..."
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          RUNS=$(gh run list --workflow="${{ github.workflow }}" --json databaseId -q '.[].databaseId')
+          for run_id in $RUNS; do
+            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then
+              echo "正在删除旧纪录 ID: $run_id"
+              gh run delete "$run_id" --repo "${{ github.repository }}" || true
+            fi
+          done
