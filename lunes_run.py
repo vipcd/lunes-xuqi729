@@ -95,7 +95,7 @@ def send_tg_notification(message, photo_path=None):
         try:
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
             with open(photo_path, "rb") as f:
-                requests.post(url, data={"chat_id": chat_id, "caption": "Lunes Host 运行实况截图"}, files={"photo": f}, proxies={"http": None, "https": None}, timeout=30)
+                requests.post(url, data={"chat_id": chat_id, "caption": "翼龙面板保活实况截图"}, files={"photo": f}, proxies={"http": None, "https": None}, timeout=30)
         except Exception as e:
             print(f"发送 TG 截图异常: {e}")
 
@@ -112,20 +112,19 @@ def run():
 
     try:
         with SB(**sb_kwargs) as sb:
-            print("正在打开 Lunes Host 登录界面...")
+            # ===== 阶段 1：登录 Lunes 客户主站 =====
+            print("【阶段 1/3】正在访问 Lunes Host 客户中心...")
             sb.uc_open_with_reconnect("https://betadash.lunes.host/login", reconnect_time=10)
             sb.sleep(6)
 
-            # 第一次物理过盾 (最外层 Cloudflare 盾)
-            print("正在检测最外层 Cloudflare 盾并尝试物理点击...")
+            print("正在检测最外层 Cloudflare 盾...")
             try:
                 sb.uc_gui_click_captcha()
                 sb.sleep(6)
             except Exception as e:
-                print(f"外层盾点击跳过: {e}")
+                print(f"外层盾过盾跳过: {e}")
 
-            # 检查并填写表单
-            print("正在定位账号密码输入框并填充...")
+            print("正在填充主站账号密码...")
             sb.wait_for_element_visible("input[type='email']", timeout=20)
             sb.update_text("input[type='email']", LUNES_EMAIL.strip())
             sb.sleep(1)
@@ -135,37 +134,67 @@ def run():
             if sb.is_element_visible("input[type='checkbox']"):
                 sb.click("input[type='checkbox']")
 
-            # 第二次物理过盾 (表单 Turnstile 人机框)
-            print("正在检测表单 Turnstile 框并尝试物理点击...")
+            print("正在检测主站 Turnstile 验证框...")
             try:
                 sb.uc_gui_click_captcha()
-                sb.sleep(6)
+                sb.sleep(5)
             except Exception as e:
-                print(f"内嵌盾点击跳过: {e}")
+                print(f"主站内嵌盾跳过: {e}")
 
-            sb.save_screenshot("lunes_before_submit.png")
-
-            # 点击登录提交
             submit_btn = "button:contains('Continue'), button:contains('Zaloguj'), button[type='submit']"
             if sb.is_element_visible(submit_btn):
-                print("正在点击提交按钮...")
+                print("正在点击主站 Continue 提交按钮...")
                 sb.click(submit_btn)
-                sb.sleep(12) # 预留充分的登录处理时间
+                sb.sleep(10)
 
-            # 验证结果
-            current_url = sb.get_current_url()
-            sb.save_screenshot("lunes_result.png")
+            # ===== 阶段 2：跳转并登录 翼龙游戏面板 =====
+            print(f"\n【阶段 2/3】正在跳转至翼龙面板: {SERVER_URL}")
+            sb.open(SERVER_URL)
+            sb.sleep(8)
 
-            if "login" in current_url or sb.is_element_visible("input[type='email']"):
-                print("❌ 自动登录失败：仍停留在登录页面。")
-                send_tg_notification("❌ <b>Lunes Host 登录失败</b>\n未能成功进入后台系统（请检查账号密码或 TG 截图中的报错提示）。", "lunes_result.png")
+            ptero_user_selector = "input[name='username'], input[type='text'], input[type='email']"
+            ptero_pass_selector = "input[name='password'], input[type='password']"
+            ptero_login_btn = "button:contains('LOGIN'), button:contains('Login'), button[type='submit']"
+
+            # 检查是否要求在翼龙面板界面登录
+            if sb.is_element_visible(ptero_pass_selector):
+                print("⚠️ 检测到翼龙面板未登录，自动执行翼龙面板登录操作...")
+
+                # 翼龙面板可能也有 Cloudflare 盾
+                try:
+                    sb.uc_gui_click_captcha()
+                    sb.sleep(5)
+                except Exception as e:
+                    print(f"翼龙面板过盾跳过: {e}")
+
+                print("正在填写翼龙面板账号与密码...")
+                sb.wait_for_element_visible(ptero_user_selector, timeout=15)
+                sb.update_text(ptero_user_selector, LUNES_EMAIL.strip())
+                sb.sleep(1)
+                sb.update_text(ptero_pass_selector, LUNES_PASSWORD.strip())
+                sb.sleep(1)
+
+                if sb.is_element_visible(ptero_login_btn):
+                    print("正在点击翼龙面板 LOGIN 按钮...")
+                    sb.click(ptero_login_btn)
+                    sb.sleep(12) # 等待面板登录并跳转进入后台
+
+            # ===== 阶段 3：最终保活确认与截图 =====
+            print("\n【阶段 3/3】正在校验最终打卡结果...")
+            sb.sleep(5) # 停留确保服务器接收到心跳
+
+            # 再次检查密码框是否依然存在（存在说明仍停留在登录界面）
+            still_login_page = sb.is_element_visible(ptero_pass_selector) or "login" in sb.get_current_url().lower()
+            sb.save_screenshot("lunes_ptero_result.png")
+
+            if still_login_page:
+                msg = "❌ <b>翼龙游戏服务器面板登录打卡失败！</b>\n脚本尝试填充并提交了登录，但页面依然停留在翼龙登录页，请查看截图中的报错。"
+                print(msg)
+                send_tg_notification(msg, "lunes_ptero_result.png")
             else:
-                print(f"✓ 登录成功！正在跳转至目标面板: {SERVER_URL}")
-                sb.open(SERVER_URL)
-                sb.sleep(15)
-                sb.save_screenshot("lunes_result.png")
-                
-                send_tg_notification("✅ <b>Lunes Host 每日自动打卡成功！</b>\n已刷新后台活跃心跳状态。", "lunes_result.png")
+                msg = "✅ <b>翼龙游戏服务器面板保活打卡成功！</b>\n已成功登录并进入翼龙面板内部，完成了活跃心跳刷新。"
+                print(msg)
+                send_tg_notification(msg, "lunes_ptero_result.png")
 
     finally:
         if proxy_proc and proxy_proc.poll() is None:
