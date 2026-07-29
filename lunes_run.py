@@ -168,6 +168,16 @@ def parse_cookies(cookie_raw: str, domain: str = "lunes.host"):
 async def main():
     proxy_address, proxy_proc = start_hy2_proxy()
 
+    # 动态获取目标面板 URL（优先使用环境变量，未设置时兜底为默认地址）
+    target_url = os.getenv("LUNES_SERVER_URL", "https://lunes.host").strip()
+    if not target_url:
+        target_url = "https://lunes.host"
+
+    # 根据目标 URL 自动提取 Base 域名（如 betadash.lunes.host -> lunes.host）
+    target_host = urllib.parse.urlparse(target_url).hostname or "lunes.host"
+    domain_parts = target_host.split(".")
+    cookie_domain = ".".join(domain_parts[-2:]) if len(domain_parts) >= 2 else target_host
+
     async with async_playwright() as p:
         browser_args = [
             "--disable-blink-features=AutomationControlled",
@@ -190,13 +200,13 @@ async def main():
             viewport={"width": 1280, "height": 720}
         )
 
-        # 注入 Cookie
+        # 注入 Cookie（自动使用动态提取的域名）
         cookie_env = os.getenv("LUNES_COOKIE", "")
         if cookie_env:
-            cookies = parse_cookies(cookie_env, domain="lunes.host")
+            cookies = parse_cookies(cookie_env, domain=cookie_domain)
             if cookies:
                 await context.add_cookies(cookies)
-                print(f"[INFO] 已向浏览器注入 {len(cookies)} 个 Cookie 参数。", flush=True)
+                print(f"[INFO] 已向浏览器注入 {len(cookies)} 个 Cookie 参数（域名: {cookie_domain}）。", flush=True)
             else:
                 print("[WARNING] 检测到 LUNES_COOKIE 环境变量，但解析为空！", flush=True)
         else:
@@ -205,8 +215,7 @@ async def main():
         page = await context.new_page()
 
         try:
-            target_url = "https://lunes.host"
-            print(f"[INFO] 正在打开目标页面: {target_url}", flush=True)
+            print(f"[INFO] 正在打开目标面板页面: {target_url}", flush=True)
             
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             print(f"[INFO] 页面加载完成，状态码: {response.status if response else 'Unknown'}", flush=True)
@@ -239,7 +248,7 @@ async def main():
                 print(f"📌 登录状态判定: {status_text}", flush=True)
                 print("========================================================", flush=True)
                 
-                send_telegram_msg(f"❌ <b>Lunes 自动续期报告</b>\n<b>状态:</b> Cookie 已过期失效，页面被重定向回登录页。\n<b>当前URL:</b> {current_url}")
+                send_telegram_msg(f"❌ <b>Lunes 自动续期报告</b>\n<b>状态:</b> Cookie 已过期失效，页面被重定向回登录页。\n<b>目标页面:</b> {target_url}\n<b>当前URL:</b> {current_url}")
                 sys.exit(1)
 
             status_text = "✅ 登录状态有效，访问续期页面成功！"
@@ -247,7 +256,7 @@ async def main():
             print("========================================================", flush=True)
             
             # 发送成功 TG 通知
-            send_telegram_msg(f"✅ <b>Lunes 自动续期成功报告</b>\n<b>网页标题:</b> {page_title}\n<b>状态:</b> Cookie 验证正常，保活访问成功！")
+            send_telegram_msg(f"✅ <b>Lunes 自动续期成功报告</b>\n<b>网页标题:</b> {page_title}\n<b>访问目标:</b> {target_url}\n<b>状态:</b> Cookie 验证正常，保活访问成功！")
 
         except Exception as e:
             err_detail = f"❌ <b>Lunes 自动续期异常</b>\n<b>详细报错:</b> {str(e)}"
